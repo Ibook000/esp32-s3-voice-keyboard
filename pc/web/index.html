@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ibook · 键盘工作台</title><link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/style.css"><script type="module" src="/app.js"></script>
+</head>
+<body>
+  <svg class="symbols" aria-hidden="true"><symbol id="arrow" viewBox="0 0 24 24"><path d="M5 12h14m-5-5 5 5-5 5"/></symbol><symbol id="link" viewBox="0 0 24 24"><path d="m10 13 4-4m-6 7-1 1a4 4 0 0 1-6-6l4-4a4 4 0 0 1 6 0m2 10a4 4 0 0 0 6 0l4-4a4 4 0 0 0-6-6l-1 1"/></symbol><symbol id="keyboard" viewBox="0 0 24 24"><rect x="2" y="5" width="20" height="14" rx="3"/><path d="M6 9h.01M10 9h.01M14 9h.01M18 9h.01M6 12h.01M10 12h.01M14 12h.01M18 12h.01M7 16h10"/></symbol></svg>
+  <header class="topbar"><a class="brand" href="/" aria-label="ibook 键盘工作台">ibook<span>键盘工作台</span></a><div class="connection"><span id="connection-status" class="status"><i></i>未连接</span><button id="connect" class="button button-dark"><svg><use href="#link"/></svg>连接键盘</button></div></header>
+  <main>
+    <div class="page-title"><div><p class="eyebrow">KEYBOARD / 自定义</p><h1>快捷键与语音</h1><p class="intro">点击下方按键，打开对应配置。</p></div><div class="page-actions"><button id="sleep-settings" class="text-button" aria-controls="sleep-dialog">深度睡眠</button><button id="help" class="text-button">使用说明 <span>↗</span></button></div></div>
+    <section class="workspace" aria-label="按键配置工作区">
+      <div class="device-workspace">
+        <div class="section-line"><span>你的键盘</span><span class="subtle">点击下方按键进行设置</span></div>
+        <div class="device-stage"><div class="device">
+          <div class="device-top">
+            <div class="oled-shell"><canvas id="oled" width="512" height="256" aria-label="OLED 名称与快捷键示意"></canvas></div>
+            <div class="hardware-module microphone-module" role="img" aria-label="INMP441 麦克风模块示意">
+              <svg class="microphone-board" viewBox="0 0 96 96" aria-hidden="true">
+                <circle cx="48" cy="48" r="44" class="mic-board-edge"/>
+                <path d="M17 29h16v14m46-14H63v14M17 67h16V53m46 14H63V53" class="module-traces"/>
+                <g class="module-pads"><circle cx="17" cy="29" r="4"/><circle cx="17" cy="48" r="4"/><circle cx="17" cy="67" r="4"/><circle cx="79" cy="29" r="4"/><circle cx="79" cy="48" r="4"/><circle cx="79" cy="67" r="4"/></g>
+                <rect x="34" y="31" width="28" height="34" rx="4" class="mic-capsule"/><circle cx="48" cy="48" r="6" class="mic-port"/><circle cx="48" cy="48" r="2.5" class="mic-port-inner"/>
+                <text x="48" y="20" text-anchor="middle" class="module-lettering">INMP441</text><path d="M40 77h16" class="module-traces"/>
+              </svg><span class="module-caption">麦克风</span>
+            </div>
+            <div class="hardware-module processor-module" role="img" aria-label="ESP32-S3 蓝牙主控芯片示意">
+              <svg class="processor-board" viewBox="0 0 80 116" aria-hidden="true">
+                <rect x="8" y="3" width="64" height="108" rx="2" class="processor-pcb"/>
+                <path d="M16 27V10h10v11h9V10h9v11h9V10h11v17" class="processor-antenna"/>
+                <path d="M5 39h7m-7 9h7m-7 9h7m-7 9h7m-7 9h7m-7 9h7m-7 9h7m56-54h7m-7 9h7m-7 9h7m-7 9h7m-7 9h7m-7 9h7m-7 9h7M19 107v7m10-7v7m11-7v7m11-7v7m10-7v7" class="processor-pins"/>
+                <rect x="12" y="34" width="56" height="71" rx="2" class="processor-shield"/><path d="M17 39h46" class="shield-highlight"/>
+                <text x="40" y="66" text-anchor="middle" class="processor-name">ESP32</text><text x="40" y="79" text-anchor="middle" class="processor-series">S3</text>
+                <path d="M31 91h18m-14 4h10" class="shield-mark"/>
+              </svg><span class="module-caption">ESP32-S3</span>
+            </div>
+          </div>
+          <div class="device-keys" role="group" aria-label="实体布局：从左到右为 KEY4、KEY1、KEY2、KEY3、旋钮">
+            <button type="button" class="record-key" id="voice-key" aria-label="KEY4，打开语音配置；实体键按住录音" aria-pressed="false" aria-controls="voice-editor"><span class="key-index">KEY 04</span><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M6 10v2a6 6 0 0 0 12 0v-2M12 18v3m-4 0h8"/></svg><span>按住录音</span></button>
+            <button class="device-key selected" data-key="0" aria-pressed="true"><span class="key-index">KEY 01</span><strong>复制</strong><span class="key-combo">Ctrl+C</span></button>
+            <button class="device-key" data-key="1" aria-pressed="false"><span class="key-index">KEY 02</span><strong>粘贴</strong><span class="key-combo">Ctrl+V</span></button>
+            <button class="device-key" data-key="2" aria-pressed="false"><span class="key-index">KEY 03</span><strong>撤销</strong><span class="key-combo">Ctrl+Z</span></button>
+            <button type="button" class="dial-area" id="rotary-key" aria-label="旋钮，打开模式配置" aria-controls="rotary-editor" aria-pressed="false"><span class="dial"><span></span></span><span class="hardware-caption" id="rotary-caption">滚动 / 确定</span></button>
+          </div>
+          <div class="device-mark"><span>ibook</span><span>PERSONAL KEYBOARD</span><i></i></div>
+        </div></div>
+        <div class="device-footnote"><span><i class="small-square"></i>屏幕示意随配置更新</span><span>录音键与旋钮保持原功能</span></div>
+        <div class="preset-strip"><span>从常用操作开始</span><div id="presets"><button data-preset="copy">复制</button><button data-preset="paste">粘贴</button><button data-preset="undo">撤销</button><button data-preset="save">保存</button><button data-preset="screen">截图</button></div></div>
+      </div>
+      <aside class="editor" id="shortcut-editor" aria-labelledby="editor-title">
+        <div class="editor-heading"><span class="key-tag" id="selected-number">01</span><div><p class="eyebrow">当前选择</p><h2 id="editor-title">按键 1</h2></div><svg><use href="#keyboard"/></svg></div>
+        <form id="key-form" novalidate>
+          <label class="field-label" for="key-label">屏幕名称</label><input id="key-label" autocomplete="off" maxlength="12" value="复制" aria-describedby="name-help"><p class="field-help" id="name-help">最多 2 个汉字或 4 个英文字符</p>
+          <div class="field-row"><label class="field-label" for="record-combo">快捷键</label><button type="button" id="clear-mods" class="text-button small">清除修饰键</button></div>
+          <button type="button" id="record-combo" class="combo-recorder" aria-describedby="record-help"><span id="combo-chips"><kbd>Ctrl</kbd><span>+</span><kbd>C</kbd></span><span id="record-label">点击录入</span></button><p class="field-help" id="record-help">点击后按下组合键；也可使用下面的选项。</p>
+          <fieldset class="modifier-fieldset"><legend class="sr-only">修饰键</legend><label><input type="checkbox" data-mod="0" checked><span>Ctrl</span></label><label><input type="checkbox" data-mod="1"><span>Shift</span></label><label><input type="checkbox" data-mod="2"><span>Alt</span></label><label><input type="checkbox" data-mod="3"><span>Win</span></label></fieldset>
+          <label class="field-label select-label" for="normal-key">普通键</label><select id="normal-key"></select>
+          <p id="validation" class="validation" role="status"></p>
+        </form>
+        <div class="editor-footer"><div class="save-status"><i id="dirty-dot"></i><span id="draft-status">已是默认配置</span></div><button id="save" class="button save-button" disabled>保存到键盘<svg><use href="#arrow"/></svg></button><div class="secondary-actions"><button id="discard" class="text-button" disabled>撤销修改</button><button id="reset" class="text-button">恢复默认</button></div><p id="save-hint">连接键盘后，即可保存。</p></div>
+      </aside>
+    <aside class="editor voice-workspace" id="voice-editor" aria-labelledby="voice-title" hidden>
+      <div class="editor-heading"><span class="key-tag">04</span><div><p class="eyebrow">当前选择 · KEY4</p><h2 id="voice-title">语音配置</h2></div></div><div class="voice-controls"><span id="voice-status" class="voice-status" role="status">未启用</span>
+        <p class="voice-description">使用键盘麦克风录音；在电脑本地识别中文。</p>
+        <form id="voice-form"><label class="voice-option"><input id="voice-enabled" type="checkbox">启用语音接收</label><label class="voice-option"><input id="voice-transcribe" type="checkbox" checked>识别为文字</label><label class="voice-option"><input id="voice-type" type="checkbox" checked>自动输入当前窗口</label>
+        <div class="voice-model-row"><label for="voice-model">识别模型</label><select id="voice-model"><option value="tiny">tiny · 快速</option><option value="base">base · 均衡</option><option value="small">small · 更准确</option></select><button id="voice-apply" class="button button-dark" type="submit">应用语音设置</button></div></form>
+        <p class="field-help">开启后按住最左侧 KEY4 说话，松开后发送。自动输入时，请保持目标输入框有焦点。首次使用模型可能需要下载。</p><p id="voice-error" class="validation" role="status"></p>
+      </div><div class="voice-results"><div class="section-line"><span>最近识别结果</span><span class="subtle">本次运行 · 最多 8 条</span></div><div id="voice-results" aria-live="polite"><p class="voice-empty">启用语音并连接键盘后，按住 KEY4 开始录音。</p></div></div>
+    </aside>
+      <aside class="editor" id="rotary-editor" aria-labelledby="rotary-title" hidden>
+        <div class="editor-heading"><span class="key-tag">↻</span><div><p class="eyebrow">当前选择 · 旋钮</p><h2 id="rotary-title">旋钮模式</h2></div></div>
+        <fieldset class="rotary-options"><legend class="field-label">选择旋转和按下的功能</legend>
+          <label><input type="radio" name="rotary-mode" value="scroll" checked><span><strong>页面滚动</strong><small>旋转：上下滚动 · 按下：Enter 确定</small></span></label>
+          <label><input type="radio" name="rotary-mode" value="volume"><span><strong>电脑音量</strong><small>顺时针：增大 · 逆时针：减小<br>按下：静音 / 取消静音</small></span></label>
+        </fieldset>
+        <p id="rotary-hint" class="field-help">连接键盘后读取当前模式。</p>
+        <button id="rotary-save" class="button save-button" disabled>保存旋钮模式</button>
+        <p class="field-help">模式保存在键盘中，断电后保留。保存前松开旋钮和按键。</p>
+      </aside>
+    </section>
+    <footer class="page-footer"><span>配置保存在键盘中，断电后依然有效。</span><div><button id="read" class="text-button" disabled>重新读取</button><span>·</span><button id="disconnect" class="text-button" disabled>断开键盘连接</button><span>·</span><button id="stop" class="text-button">退出服务</button></div></footer>
+  </main>
+  <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+  <dialog id="device-dialog"><div class="dialog-heading"><h2>连接你的键盘</h2><button class="close-dialog" aria-label="关闭">×</button></div><p>先在 Windows 蓝牙设置中配对 ibook Keyboard。</p><div id="device-list" class="device-list" aria-live="polite"></div><button id="refresh-devices" class="text-button">重新查找</button></dialog>
+  <dialog id="sleep-dialog"><div class="dialog-heading"><h2>自动深度睡眠</h2><button class="close-dialog" aria-label="关闭">×</button></div>
+    <p>没有独立熄屏计时。闲置到指定时间后，关闭屏幕并进入深睡，蓝牙会断开。</p>
+    <label class="field-label" for="sleep-minutes">闲置多久后进入深睡</label><select id="sleep-minutes"><option value="0">关闭自动深睡</option><option value="1">1 分钟</option><option value="5">5 分钟</option><option value="10" selected>10 分钟（默认）</option><option value="30">30 分钟</option><option value="60">60 分钟</option><option value="120">120 分钟</option></select>
+    <p>按 KEY1～KEY4 或按下旋钮唤醒。第一次按下只唤醒，全部松开并等待蓝牙重连后，再正常操作。旋转旋钮不唤醒深睡。</p>
+    <p>录音、音频传输、配置保存或按键未松开期间不会进入深睡。设置保存在键盘，重启后保留。</p>
+    <p id="sleep-hint" class="field-help">连接键盘后读取当前设置。</p><button id="sleep-save" class="button save-button" disabled>保存深睡设置</button>
+  </dialog>
+  <dialog id="help-dialog"><div class="dialog-heading"><h2>几步就能设置好</h2><button class="close-dialog" aria-label="关闭">×</button></div><ol><li>首次使用，先烧录支持网页配置的新版固件，再删除 Windows 旧配对并重新添加。</li><li>点击“连接键盘”，读取键盘当前配置。</li><li>选择 KEY1～KEY3，修改屏幕名称，录入或选择组合键。</li><li>松开实体按键并结束录音，点击“保存到键盘”。看到保存成功后，设置即已生效。</li></ol><p>Win 等系统组合键可能无法被浏览器直接录入，请改用修饰键和普通键选项。点击网页 KEY4 打开语音配置；实体 KEY4 仍用于录音，旋钮用于滚动和确定。</p></dialog>
+</body></html>

@@ -1,0 +1,48 @@
+# 本地构建、依赖与语音模型缓存
+.pio/
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+
+# Python / 检查工具缓存
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# 用户录音、文字、设备地址、设置和运行日志
+pc/recordings/
+pc/runtime/
+*.log
+
+# 编辑器和系统生成文件
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# 本机凭据与临时备份
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.tmp
+*.bak
+*.orig
+*.swp
+
+# 编译中间文件与可执行产物；README 的 PNG 配图正常提交
+*.o
+*.a
+*.bin
+*.elf
+*.map
+*.exe
+*.dll
+*.pyd

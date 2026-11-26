@@ -10,7 +10,8 @@ constexpr char CONTROL_UUID[] = "cba10001-7d2f-4a6b-9c11-18d5e0010001";
 constexpr char AUDIO_UUID[] = "cba10002-7d2f-4a6b-9c11-18d5e0010001";
 constexpr char STATUS_UUID[] = "cba10003-7d2f-4a6b-9c11-18d5e0010001";
 
-constexpr uint8_t VERSION = 1;
+// 版本 2：录音时逐帧发送，电脑按累积帧号确认，可边收边识别。
+constexpr uint8_t VERSION = 2;
 constexpr uint8_t STATUS_TYPE = 0x10;
 constexpr uint8_t AUDIO_TYPE = 0x20;
 constexpr unsigned SAMPLE_RATE = 16000;

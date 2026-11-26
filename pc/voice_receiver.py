@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import logging
 import math
 import sys
 import threading
@@ -32,6 +33,10 @@ from voice_protocol import (
     DeviceStatus,
     State,
 )
+
+# 流式固件下不必每帧确认：攒够若干帧或短时间无新帧就回一次累积 ACK。
+STREAM_ACK_FRAMES = 4
+STREAM_ACK_SECONDS = 0.12
 
 
 def console_reader(loop: asyncio.AbstractEventLoop, events: asyncio.Queue) -> None:
@@ -126,6 +131,62 @@ async def receive(args: argparse.Namespace, output: SpeechOutput, *, client=None
     current: DeviceStatus | None = None
     last_progress = time.monotonic()
     last_status_packet: bytes | None = None
+    streaming_output = getattr(output, "streaming", False) is True  # 引擎支持边收边识别。
+    acked_frames = 0  # 最近一次累积 ACK 覆盖到的帧数。
+    acked_at = 0.0
+    stream_jobs: asyncio.Queue = asyncio.Queue()
+    stream_abort: asyncio.Event | None = None
+
+    async def flush_ack(*, repeat: bool = False) -> None:
+        """批量确认新帧；设备重发已收到的帧时也可补发同一个累积 ACK。"""
+        nonlocal acked_frames, acked_at, last_progress
+        if clip is None or not clip.cumulative:
+            return
+        pending = clip.next_sequence - acked_frames
+        if not pending and not repeat:
+            return
+        now = time.monotonic()
+        if pending < STREAM_ACK_FRAMES and now - acked_at < STREAM_ACK_SECONDS:
+            return
+        await client.write_gatt_char(CONTROL_UUID, clip.ack(clip.next_sequence), response=True)
+        acked_frames = clip.next_sequence
+        acked_at = now
+        if pending:
+            last_progress = now
+
+    def push_audio() -> None:
+        """将 PCM 排入识别队列，让 BLE 确认无需等待模型消费。"""
+        if clip is None or not streaming_output or clip.test_tone:
+            return
+        chunk = clip.take_pcm()
+        if chunk:
+            stream_jobs.put_nowait((stream_abort, output.push, (chunk,)))
+
+    def cancel_stream() -> None:
+        if stream_abort is not None:
+            stream_abort.set()
+            stream_jobs.put_nowait((None, output.cancel, ()))
+
+    async def process_stream() -> None:
+        """串行执行开始、PCM、定稿和取消，防止下一段录音抢先重置识别流。"""
+        while (job := await stream_jobs.get()) is not None:
+            aborted, action, arguments = job
+            if aborted is not None and aborted.is_set():
+                continue
+            try:
+                await asyncio.to_thread(action, *arguments)
+            except Exception as exc:
+                if args.duration is not None:
+                    raise
+                if aborted is not None:
+                    aborted.set()
+                events.put_nowait(("speech_error", exc))
+
+    def finish_clip(path: Path, test_tone: bool):
+        """整段收齐后定稿：流式引擎冲尾返回全文，旧引擎直接转写整个 WAV。"""
+        if streaming_output:
+            return output.end(path, test_tone)
+        return output.process(path, test_tone)
 
     def disconnected(_):
         loop.call_soon_threadsafe(events.put_nowait, ("disconnected", None))
@@ -146,7 +207,7 @@ async def receive(args: argparse.Namespace, output: SpeechOutput, *, client=None
     async def process_saved_clip(path: Path, test_tone: bool):
         async with speech_lock:
             try:
-                await asyncio.to_thread(output.process, path, test_tone)
+                await asyncio.to_thread(finish_clip, path, test_tone)
             except Exception as exc:
                 await events.put(("speech_error", exc))
 
@@ -201,6 +262,12 @@ async def receive(args: argparse.Namespace, output: SpeechOutput, *, client=None
                 last_error=None,
             )
         print(f"Connected; ATT MTU={client.mtu_size}.", flush=True)
+        print(
+            f"Voice protocol v{current.version}: "
+            + ("real-time streaming" if current.streaming else "record then transfer")
+            + ".",
+            flush=True,
+        )
         if args.type_text:
             print(
                 "Text input enabled: focus the destination window before releasing the physical voice button.",
@@ -217,6 +284,7 @@ async def receive(args: argparse.Namespace, output: SpeechOutput, *, client=None
             console_reader(loop, events)
 
         next_poll = time.monotonic() + 1
+        stream_task = asyncio.create_task(process_stream()) if streaming_output else None
         try:
             while True:
                 # 3. 每秒补读状态，弥补完成/错误通知丢失；超时不保存残缺音频。
@@ -235,12 +303,15 @@ async def receive(args: argparse.Namespace, output: SpeechOutput, *, client=None
                 try:
                     kind, data = await asyncio.wait_for(events.get(), 0.25)
                 except asyncio.TimeoutError:
+                    await flush_ack()
                     continue
 
                 if kind == "disconnected":
                     raise RuntimeError("Keyboard disconnected; incomplete audio was not saved")
                 if kind == "speech_error":
-                    print(f"Speech recognition failed; WAV is retained: {data}", file=sys.stderr)
+                    logging.warning("Speech recognition failed: %s", data)
+                    if runtime:
+                        runtime.update(last_error=str(data))
                     continue
                 if kind == "command":
                     if data == "q":
@@ -253,6 +324,7 @@ async def receive(args: argparse.Namespace, output: SpeechOutput, *, client=None
 
                 # 4. 状态通知决定会话边界；音频通知负责拼片、校验、解码和 ACK。
                 if kind == "status":
+                    next_poll = time.monotonic() + 1
                     current = DeviceStatus.parse(data)
                     changed = data != last_status_packet
                     if changed:
@@ -266,16 +338,29 @@ async def receive(args: argparse.Namespace, output: SpeechOutput, *, client=None
                             runtime.update(status=current.state.name.lower(), connected=True)
                     if current.state == State.ERROR:
                         message = ERRORS.get(current.error, f"Device error {current.error}")
+                        if streaming_output and clip is not None and not clip.complete:
+                            cancel_stream()
                         clip = None
                         if args.duration is not None:
                             raise RuntimeError(message)
                         if changed:
-                            print(message, flush=True)
+                            logging.warning("Voice session %s: %s", current.session, message)
+                            if runtime:
+                                runtime.update(last_error=message)
                         continue
                     if current.state in (State.RECORDING, State.SENDING):
                         if clip is None or clip.session != current.session:
-                            clip = ClipAssembler(current.session)
+                            clip = ClipAssembler(current.session, cumulative=current.streaming)
                             saved_session = None
+                            acked_frames = 0
+                            acked_at = time.monotonic()
+                            stream_abort = None
+                            if runtime:
+                                runtime.update(last_error=None)
+                            if streaming_output and not current.flags & 1:
+                                # 新版固件边录边发，录音一开始就建好识别流。
+                                stream_abort = asyncio.Event()
+                                stream_jobs.put_nowait((stream_abort, output.begin, ()))
                         clip.update(current)
                     elif (
                         current.state == State.COMPLETE and clip and clip.session == current.session
@@ -283,22 +368,29 @@ async def receive(args: argparse.Namespace, output: SpeechOutput, *, client=None
                         clip.update(current)
 
                 elif kind == "audio" and clip:
+                    next_sequence = clip.next_sequence
                     try:
                         ack = clip.feed(data)
                     except ValueError as exc:
                         print(f"Waiting for frame retry: {exc}", flush=True)
                         continue
                     if ack is not None:
-                        await client.write_gatt_char(CONTROL_UUID, ack, response=True)
-                        last_progress = time.monotonic()
+                        if clip.cumulative:
+                            await flush_ack(repeat=clip.next_sequence == next_sequence)
+                        else:
+                            await client.write_gatt_char(CONTROL_UUID, ack, response=True)
+                            last_progress = time.monotonic()
+                    push_audio()
 
                 if clip and clip.complete and saved_session != clip.session:
-                    # 5. 收齐全部帧且设备报告 COMPLETE，才保存 WAV 并启动识别。
+                    # 5. 收齐全部帧且设备报告 COMPLETE，才保存 WAV 并定稿识别。
                     path = save_clip(clip, args.output)
                     saved_session = clip.session
-                    # 单次模式等识别结束再退出；常驻模式在工作线程排队识别。
-                    if args.duration is not None:
-                        await asyncio.to_thread(output.process, path, clip.test_tone)
+                    if streaming_output:
+                        aborted = None if clip.test_tone else stream_abort
+                        stream_jobs.put_nowait((aborted, finish_clip, (path, clip.test_tone)))
+                    elif args.duration is not None:
+                        await asyncio.to_thread(finish_clip, path, clip.test_tone)
                     else:
                         task = asyncio.create_task(process_saved_clip(path, clip.test_tone))
                         speech_tasks.add(task)
@@ -321,6 +413,12 @@ async def receive(args: argparse.Namespace, output: SpeechOutput, *, client=None
             ):
                 with contextlib.suppress(Exception):
                     await client.write_gatt_char(CONTROL_UUID, bytes([CANCEL]), response=True)
+            if streaming_output and clip is not None and not clip.complete:
+                # 断线/取消留下的半截会话不能作为下一段的输入。
+                cancel_stream()
+            if stream_task:
+                stream_jobs.put_nowait(None)
+                await stream_task
             if speech_tasks:
                 await asyncio.gather(*speech_tasks)
 

@@ -1,7 +1,7 @@
 // 语音设置和结果使用工作台同一个本地 API，不在浏览器采集麦克风。
 let latest=null, dirty=false, applying=false;
 const $=s=>document.querySelector(s);
-const labels={disabled:'未启用',waiting:'等待连接',loading_model:'正在加载模型…',subscribing:'正在准备录音…',connecting:'正在订阅',connected:'等待 KEY4',idle:'等待 KEY4',recording:'正在录音',sending:'正在传输',complete:'录音已接收',error:'语音异常'};
+const labels={disabled:'未启用',waiting:'等待连接',loading_model:'正在加载模型…',subscribing:'正在准备录音…',connecting:'正在订阅',connected:'等待 KEY4',idle:'等待 KEY4',recording:'正在录音',sending:'正在收尾',complete:'录音已接收',error:'语音异常'};
 export function renderVoice(voice, connected=false) {
   if(!voice)return;
   latest=voice;
@@ -15,6 +15,8 @@ export function renderVoice(voice, connected=false) {
   $('#voice-status').textContent=voice.processing?'正在识别…':voice.settings.enabled && !connected?'等待连接':labels[voice.status] || voice.status;
   $('#voice-status').classList.toggle('error',Boolean(voice.last_error));
   $('#voice-error').textContent=voice.last_error || '';
+  const partial=$('#voice-partial');
+  partial.hidden=!voice.partial;partial.textContent=voice.partial?voice.partial+'…':'';
   const list=$('#voice-results');list.replaceChildren();
   if(!voice.results.length){const p=document.createElement('p');p.className='voice-empty';p.textContent='启用语音并连接键盘后，按住 KEY4 开始录音。';list.append(p);}
   voice.results.forEach(result=>{

@@ -18,8 +18,11 @@
 namespace {
 constexpr unsigned RATE = VoiceProtocol::SAMPLE_RATE;
 constexpr unsigned MAX_FRAMES = VOICE_MAX_SECONDS * RATE / VoiceCodec::SAMPLES;
-constexpr uint32_t ACK_TIMEOUT_MS = 1000;
+// 边录边发：允许 STREAM_WINDOW 帧尚未被电脑确认，超时从确认位置重发。
+constexpr uint16_t STREAM_WINDOW = 8;
+constexpr uint32_t ACK_TIMEOUT_MS = 600;
 constexpr uint32_t SEND_TIMEOUT_MS = 5000;
+constexpr uint32_t PUBLISH_INTERVAL_MS = 250;
 constexpr unsigned MAX_RETRIES = 5;
 constexpr uint32_t BUTTON_DEBOUNCE_MS = 25;
 static_assert(VOICE_MAX_SECONDS > 0 && VOICE_MAX_SECONDS <= 10,
@@ -68,11 +71,12 @@ bool i2sInstalled = false;
 State state = IDLE;
 Error error = VOICE_OK;
 uint16_t session = 0;
-uint16_t txSequence = 0;
+uint16_t txCursor = 0;  // 下一帧待发；录音中随采音推进。
+uint16_t ackCursor = 0;  // 电脑已确认的下一帧，可一次跨多帧。
 size_t txOffset = 0;
-bool awaitingAck = false;
 unsigned retries = 0;
 uint32_t lastProgress = 0;
+uint32_t lastPublish = 0;
 bool voiceLink = false;
 bool buttonPressed = false;
 
@@ -92,6 +96,7 @@ void publish() {
   VoiceCodec::put16(value + 18, (tone ? 1 : 0) | (micConfigured() ? 2 : 0));
   status->setValue(value, sizeof(value));
   if (voiceLink && statusCccd->getNotifications()) status->notify();
+  lastPublish = millis();
 }
 
 void fail(Error why) {
@@ -229,6 +234,11 @@ void start(bool testTone) {
   captureError.store(VOICE_OK);
   captureDone.store(false);
   captureWanted.store(true);
+  ackCursor = 0;
+  txCursor = 0;
+  txOffset = 0;
+  retries = 0;
+  lastProgress = millis();
   state = RECORDING;
   publish();
   xTaskNotifyGive(captureTask);
@@ -265,45 +275,49 @@ void processCommand(const Command& cmd) {
     captureWanted.store(false);
   else if (cmd.op == OP_CANCEL)
     fail(CANCELLED);
-  else if (cmd.op == ACK && state == SENDING && awaitingAck && cmd.session == session &&
-           cmd.sequence == txSequence) {
-    ++txSequence;
-    txOffset = 0;
-    awaitingAck = false;
+  else if (cmd.op == ACK && cmd.session == session) {
+    // 电脑回的是「下一期望帧号」：一次确认覆盖此前所有帧。
+    const uint16_t captured = capturedFrames.load();
+    if (cmd.sequence <= ackCursor || cmd.sequence > captured) return;
+    ackCursor = cmd.sequence;
+    if (ackCursor > txCursor) {
+      txCursor = ackCursor;
+      txOffset = 0;
+    }
     retries = 0;
     lastProgress = millis();
-    if (txSequence == capturedFrames.load()) {
-      state = COMPLETE;
-      publish();
-      Serial.println("[Voice] Transfer complete.");
-    }
+    if (ackCursor == captured) Serial.printf("[Voice] ACK %u/%u\n", ackCursor, captured);
   } else if (cmd.op == 0xFF)
     fail(BAD_COMMAND);
 }
 
 void transmit() {
   const uint32_t now = millis();
-  if (awaitingAck) {
+  const uint16_t captured = capturedFrames.load();
+  // 窗口满或尾帧已发尽时等 ACK，超时后从已确认位置重发。
+  const bool waitingForTailAck = state == SENDING && txCursor == captured && ackCursor < txCursor;
+  if (uint16_t(txCursor - ackCursor) >= STREAM_WINDOW || waitingForTailAck) {
     if (now - lastProgress < ACK_TIMEOUT_MS) return;
     if (++retries > MAX_RETRIES) {
       fail(ACK_TIMEOUT);
       return;
     }
-    awaitingAck = false;
+    txCursor = ackCursor;
     txOffset = 0;
     lastProgress = now;
   }
-  // At most one fragment per loop; retain the same bytes until locally queued.
+  if (txCursor >= captured) return;  // 没有新采到的帧，等录音任务推进
+  // 每轮循环最多发一个分片；保留同一份字节直到本地通知成功入队。
   const size_t limit = min(size_t(mtu.load() - 3), VoiceProtocol::MAX_NOTIFICATION_BYTES);
   const size_t remaining = VoiceCodec::BLOCK_BYTES - txOffset;
   const size_t length = min(remaining, limit - VoiceProtocol::FRAGMENT_HEADER_BYTES);
   uint8_t packet[VoiceProtocol::MAX_NOTIFICATION_BYTES] = {VoiceProtocol::VERSION,
                                                            VoiceProtocol::AUDIO_TYPE};
   VoiceCodec::put16(packet + 2, session);
-  VoiceCodec::put16(packet + 4, txSequence);
+  VoiceCodec::put16(packet + 4, txCursor);
   VoiceCodec::put16(packet + 6, txOffset);
   memcpy(packet + VoiceProtocol::FRAGMENT_HEADER_BYTES,
-         blocks + txSequence * VoiceCodec::BLOCK_BYTES + txOffset, length);
+         blocks + txCursor * VoiceCodec::BLOCK_BYTES + txOffset, length);
   audio->setValue(packet, length + VoiceProtocol::FRAGMENT_HEADER_BYTES);
   notifyQueued.store(false);
   audio->notify();
@@ -312,8 +326,11 @@ void transmit() {
     return;
   }
   txOffset += length;
+  if (txOffset == VoiceCodec::BLOCK_BYTES) {
+    txOffset = 0;
+    ++txCursor;
+  }
   lastProgress = now;
-  if (txOffset == VoiceCodec::BLOCK_BYTES) awaitingAck = true;
 }
 }  // namespace
 
@@ -371,14 +388,15 @@ bool busy() {
 
 Snapshot snapshot() {
   return {state,        error,      capturedFrames.load(),
-          txSequence,   MAX_FRAMES, voiceLink && audioCccd && audioCccd->getNotifications(),
+          ackCursor,    MAX_FRAMES, voiceLink && audioCccd && audioCccd->getNotifications(),
           buttonPressed};
 }
 
 void update(bool encryptedConnection) {
   voiceLink = encryptedConnection;
   if (!voiceLink && (state == RECORDING || state == SENDING)) fail(DISCONNECTED);
-  if (state == SENDING && !audioCccd->getNotifications()) fail(NOT_SUBSCRIBED);
+  if ((state == RECORDING || state == SENDING) && !audioCccd->getNotifications())
+    fail(NOT_SUBSCRIBED);
 
   updateButton();
 
@@ -387,22 +405,29 @@ void update(bool encryptedConnection) {
     processCommand(cmd);
   }
 
-  if (state == RECORDING && captureDone.load()) {
-    if (captureError.load() != VOICE_OK) {
-      fail(static_cast<Error>(captureError.load()));
-    } else if (!capturedFrames.load()) {
-      fail(EMPTY);
-    } else {
-      state = SENDING;
-      txSequence = 0;
-      txOffset = 0;
-      retries = 0;
-      awaitingAck = false;
-      lastProgress = millis();
-      publish();
-      Serial.printf("[Voice] Sending %u frames.\n", capturedFrames.load());
+  if (state == RECORDING) {
+    transmit();
+    // 录音中周期性刷新帧数，电脑每秒还会补读一次。
+    if (millis() - lastPublish >= PUBLISH_INTERVAL_MS) publish();
+    if (captureDone.load()) {
+      if (captureError.load() != VOICE_OK) {
+        fail(static_cast<Error>(captureError.load()));
+      } else if (!capturedFrames.load()) {
+        fail(EMPTY);
+      } else {
+        state = SENDING;
+        publish();
+        Serial.printf("[Voice] Flushing %u frames.\n", capturedFrames.load());
+      }
     }
   }
-  if (state == SENDING) transmit();
+  if (state == SENDING) {
+    transmit();
+    if (ackCursor == capturedFrames.load()) {
+      state = COMPLETE;
+      publish();
+      Serial.println("[Voice] Transfer complete.");
+    }
+  }
 }
 }  // namespace VoiceBLE

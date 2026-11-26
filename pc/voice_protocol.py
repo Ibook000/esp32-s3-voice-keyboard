@@ -23,6 +23,8 @@ FRAME_SAMPLES = 320  # 每帧 20 ms，每个采样解码后占 2 字节。
 BLOCK_BYTES = 168  # 每帧 ADPCM：6 字节头 + 160 字节编码数据 + 2 字节 CRC。
 MAX_FRAMES = 500  # 500 × 20 ms = 10 秒。
 STOP, START, TEST_TONE, ACK, CANCEL = range(5)
+LEGACY_VERSION = 1  # 录完整段再发送；ACK 回显收到的帧号。
+STREAM_VERSION = 2  # 边录边发；ACK 回「下一期望帧号」，可累积确认。
 
 # IMA ADPCM 标准步长表和索引增量表；编码器与解码器必须一致。
 STEPS = (
@@ -139,6 +141,7 @@ ERRORS = {
     7: "Recording cancelled.",
     8: "Recording was empty. Hold the button longer than 20 ms.",
     9: "Invalid control command.",
+    10: "Recording buffer overflowed; the link could not keep up with live audio.",
 }
 
 
@@ -158,6 +161,12 @@ class DeviceStatus:
     samples: int
     max_seconds: int
     flags: int
+    version: int = LEGACY_VERSION
+
+    @property
+    def streaming(self) -> bool:
+        """版本 2 的固件在录音时就发送音频，可边收边识别。"""
+        return self.version == STREAM_VERSION
 
     @classmethod
     def parse(cls, packet: bytes) -> DeviceStatus:
@@ -165,9 +174,9 @@ class DeviceStatus:
         if len(packet) != STATUS.size:
             raise ValueError("Status packet must contain 20 bytes")
         version, kind, state, *fields = STATUS.unpack(packet)
-        if version != 1 or kind != 0x10:
+        if version not in (LEGACY_VERSION, STREAM_VERSION) or kind != 0x10:
             raise ValueError("Unsupported voice protocol")
-        result = cls(State(state), *fields)
+        result = cls(State(state), *fields, version=version)
         if (
             result.sample_rate != SAMPLE_RATE
             or result.frame_samples != FRAME_SAMPLES
@@ -221,16 +230,31 @@ class ClipAssembler:
     partial 保存未收齐的 ADPCM 块，pcm 累积解码后的音频。
     ACK 丢失时重复确认已接收帧，但不重复追加音频；坏帧等待设备超时重传。
     只有收到 COMPLETE 且所有帧齐全，complete 才设为 True。
+
+    cumulative=True 对应版本 2 固件：ACK 回「下一期望帧号」，
+    这样一次确认可覆盖此前所有帧，适合边录边发的流式接收。
     """
 
-    def __init__(self, session: int):
+    def __init__(self, session: int, cumulative: bool = False):
         self.session = session
+        self.cumulative = cumulative
         self.next_sequence = 0
         self.partial = bytearray()
         self.pcm = bytearray()
+        self.drained = 0
         self.expected_frames: int | None = None
         self.complete = False
         self.test_tone = False
+
+    def ack(self, sequence: int) -> bytes:
+        """确认一帧；流式固件按下一期望帧号累积确认。"""
+        return struct.pack("<BHH", ACK, self.session, self.next_sequence if self.cumulative else sequence)
+
+    def take_pcm(self) -> bytes:
+        """取出自上次调用后新解码的 PCM，供流式识别立即消费。"""
+        chunk = bytes(self.pcm[self.drained :])
+        self.drained = len(self.pcm)
+        return chunk
 
     def update(self, status: DeviceStatus) -> None:
         """用状态包记录预期帧数，并在设备完成时检查是否有缺帧。"""
@@ -253,7 +277,8 @@ class ClipAssembler:
         if len(packet) <= FRAGMENT.size:
             raise ValueError("Truncated audio fragment")
         version, kind, session, sequence, offset = FRAGMENT.unpack_from(packet)
-        if version != 1 or kind != 0x20:
+        expected_version = STREAM_VERSION if self.cumulative else LEGACY_VERSION
+        if version != expected_version or kind != 0x20:
             raise ValueError("Invalid audio fragment type")
         if session != self.session:
             return None
@@ -261,7 +286,9 @@ class ClipAssembler:
             raise ValueError("Audio fragment out of bounds")
         if sequence < self.next_sequence:
             # 旧帧说明上一次 ACK 可能丢失，再确认即可，不再解码或追加。
-            return struct.pack("<BHH", ACK, session, sequence)
+            if self.cumulative and offset != 0:
+                return None  # 一次重发只需回一次累积 ACK。
+            return self.ack(sequence)
         if sequence != self.next_sequence:
             return None
         if self.expected_frames is not None and sequence >= self.expected_frames:
@@ -284,4 +311,4 @@ class ClipAssembler:
             raise ValueError("Unexpected audio frame length")
         self.pcm.extend(decoded)
         self.next_sequence += 1
-        return struct.pack("<BHH", ACK, session, sequence)
+        return self.ack(sequence)

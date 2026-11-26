@@ -1,3 +1,4 @@
 -r requirements.txt
 faster-whisper>=1.2,<2
 numpy>=1.26,<3
+sherpa-onnx>=2.0,<3

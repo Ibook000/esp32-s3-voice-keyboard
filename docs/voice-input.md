@@ -1,7 +1,8 @@
 # 自定义 BLE 语音输入
 
-流程：麦克风 → ESP32-S3 I2S 采集 → ADPCM 缓存 → BLE 传输 → 电脑 WAV → 本地转写。
-默认每段最多 **10 秒**；松开按钮或到达上限后发送。录完再传，不是实时通话，也不会注册为系统麦克风。
+流程：麦克风 → ESP32-S3 I2S 采集 → 每 20 ms 压成 ADPCM 块 → BLE 边录边发 → 电脑增量解码 → 本地流式识别 → 句末定稿输入。
+单段最长 **10 秒**；录音期间音频持续上传，每句话停顿约 1 秒就定稿上屏，松开按钮补完最后一段。
+它不会注册为系统麦克风，也不把音频送到云端。
 
 ## 1. 接线和固件配置
 
@@ -62,7 +63,7 @@ Windows 已作为键盘连接它时，会从系统已配对设备中查找，复
 ## 统一工作台（推荐）
 
 双击 `pc/start.cmd`，在网页连接键盘，下方勾选“启用语音接收”“识别为文字”，按需开启“自动输入当前窗口”，再点击“应用语音设置”。
-等待状态“等待 KEY4”后，在目标输入框按住实体 KEY4 说话，松开发送。网页显示最近识别结果，可复制。
+等待状态“等待 KEY4”后，在目标输入框按住实体 KEY4 说话：每说完一句停顿一下，这一句就会自动输入；网页同时显示正在识别的那半句。松开按钮补完剩余内容。
 快捷键配置和语音现在共用一个进程和一条 BLE 连接，无需另启语音后台。日常说明见 [PC 工作台说明](../pc/README.md)。
 网页“退出服务”停止工作台与语音；只关闭页面标签会继续运行。日志在 `pc/runtime/web-config.log`。
 日常入口为 `pc/start.cmd`，旧版独立接收器管理工具已放入 `pc/tools/`，仅供调试。
@@ -79,9 +80,16 @@ Windows 已作为键盘连接它时，会从系统已配对设备中查找，复
 - 串口命令：`v` 开始麦克风录音、`b` 结束发送、`n` 开始测试音、`x` 取消。需要先运行电脑接收程序。
 - 一次性录制 5 秒并接收：追加 `--duration 5`。
 
-识别采用 faster-whisper，默认多语言 `small` 模型、CPU int8、中文 `zh`。
-**首次运行需联网下载模型**，缓存到项目 `.pio/asr_models` 后可离线使用，音频不上传到识别服务。
-`--model tiny` 可用于较小模型试运行；`--model 本地模型目录` 可指定预先下载的模型。模型影响速度和准确率。
+识别用 **sherpa-onnx 流式中文 Zipformer**（`zipformer-zh` 预设，int8，CPU 两线程），音频一帧一帧喂进去，
+停顿约 1 秒定稿一句，不需要等整段结束。模型缓存在 `.pio/asr_models`，之后完全离线。
+
+```powershell
+.\.venv\Scripts\python.exe pc/tools/fetch_asr_model.py            # 下载 zipformer-zh
+.\.venv\Scripts\python.exe pc/tools/fetch_asr_model.py zipformer-zh-14m   # 更小的 14M 版本
+```
+
+工作台用的就是这套流式引擎；`voice_receiver.py --transcribe` 的前台调试模式仍用 faster-whisper，
+适合离线核对整段 WAV（`--model tiny/base/small`）。两条路径都不上传音频。
 
 ## 5. 可选：输入到当前窗口
 
@@ -94,14 +102,15 @@ Windows 已作为键盘连接它时，会从系统已配对设备中查找，复
 
 ## 传输行为
 
-- 16 kHz 单声道，电脑输出 PCM16 WAV。板端每 20 ms 压成独立 IMA ADPCM 块；10 秒缓冲约 84 KB，不要求 PSRAM。
-- HID 与语音服务共存。控制写入和音频通知订阅要求加密连接。
-- 根据实际 ATT MTU 分片，最小 MTU 23 也可传，MTU 越小传输越慢。
-- 会话 ID、帧序号、偏移和 CRC16 检查完整性。电脑只确认完整有效的帧；丢片/丢 ACK 重传，重复帧不重复追加。
-- 每帧最多重传 5 次。断线、取消、超时、未收齐时不保存残缺 WAV、不转写。
-- 发送期间不能开始下一段。键盘主循环继续运行；电脑识别任务在后台串行执行。
+- 16 kHz 单声道，电脑输出 PCM16 WAV。板端每 20 ms 压成独立 IMA ADPCM 块，编码完立刻 notify；10 秒缓冲约 84 KB，不要求 PSRAM。
+- 协议版本 2：录音阶段就在发送，`SENDING` 只表示松键后的冲尾；ACK 回「下一期望帧号」，一次确认可跨多帧。
+- 电脑批量发送累积 ACK。板端允许 8 帧未被确认，窗口满或松键发完尾帧后，600 ms 未确认新的帧就重发，最多 5 次。
+- 根据实际 ATT MTU 分片，最小 MTU 23 也能传，但实时性会下降（168 字节块要拆 14 片）。
+- 会话 ID、帧序号、偏移和 CRC16 检查完整性。电脑只确认完整有效并解码成功的帧；重复帧只重复确认、不重复追加。
+- 断线、取消、超时、未收齐时不保存残缺 WAV、不做定稿识别。
+- 发送期间不能开始下一段。键盘主循环继续运行；识别跑在独立子进程，模型崩溃不会带走网页和蓝牙连接。
 - 退出电脑程序会取消录音；重开程序会取消旧进程遗留的未完成会话。
-- 单主机短句语音方案，真实延迟和质量需要在实际硬件上验证。
+- 旧版（协议版本 1）固件仍可用：电脑会退回「收完整段再识别」，只是没有实时上屏。
 
 ## 常见问题
 
@@ -119,8 +128,9 @@ pio run
 python -m unittest discover -s pc/tests -v
 ```
 
-覆盖 C++ 编码/Python 解码互通、CRC 和边界、MTU 23 分片、丢片/丢 ACK、重复帧、丢完成通知及断线。
+覆盖 C++ 编码/Python 解码互通、CRC 和边界、MTU 23 分片、丢片/丢 ACK、重复帧、丢完成通知、断线，
+以及版本 2 的边录边发：录音阶段就推送 PCM、累积 ACK、句末定稿不重复输入。
 C++ 编解码互通测试需要 `g++`，缺少时跳过；其他测试只依赖 Python 标准库。
 这些测试不能替代真实麦克风、开发板、电脑蓝牙和识别效果验证。
 
-参考：[Bleak 客户端 API](https://bleak.readthedocs.io/en/stable/api/client.html)、[faster-whisper](https://github.com/SYSTRAN/faster-whisper)、[ESP32-S3 I2S](https://docs.espressif.com/projects/esp-idf/en/v4.4.7/esp32s3/api-reference/peripherals/i2s.html)。
+参考：[Bleak 客户端 API](https://bleak.readthedocs.io/en/stable/api/client.html)、[sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)、[faster-whisper](https://github.com/SYSTRAN/faster-whisper)、[ESP32-S3 I2S](https://docs.espressif.com/projects/esp-idf/en/v4.4.7/esp32s3/api-reference/peripherals/i2s.html)。

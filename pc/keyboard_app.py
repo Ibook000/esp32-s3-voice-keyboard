@@ -15,13 +15,14 @@ import time
 from pathlib import Path
 
 from keymap_client import KeymapClient
-from speech_process import ProcessSpeechOutput
+from speech_process import StreamSpeechOutput
+from stream_asr import MODELS
 from voice_background import SingleInstance
 from voice_discovery import read_json, write_json
 from voice_receiver import receive
 from windows_input import type_text_windows
 
-DEFAULT_VOICE = {"enabled": False, "transcribe": True, "type_text": True, "model": "tiny"}
+DEFAULT_VOICE = {"enabled": False, "transcribe": True, "type_text": True, "model": "zipformer-zh"}
 
 
 def validate_voice(value):
@@ -29,8 +30,8 @@ def validate_voice(value):
         raise ValueError("请提供完整的语音设置。")
     if any(type(value[key]) is not bool for key in ("enabled", "transcribe", "type_text")):
         raise ValueError("语音开关格式无效。")
-    if value["model"] not in ("tiny", "base", "small"):
-        raise ValueError("请选择 tiny、base 或 small 模型。")
+    if value["model"] not in MODELS:
+        raise ValueError("请选择可用的流式识别模型。")
     result = dict(value)
     if not result["transcribe"]:
         result["type_text"] = False
@@ -43,10 +44,31 @@ class SessionOutput:
     def __init__(self, owner, args, generation):
         self.owner, self.generation = owner, generation
         self.engine = owner.output_factory(args)
+        self.streaming = getattr(self.engine, "streaming", False) is True
         self.loop = asyncio.get_running_loop()
+        attach = getattr(self.engine, "attach", None)
+        if callable(attach) and self.streaming:
+            attach(
+                lambda text: self.post(self.owner.committed, text),
+                lambda text: self.post(self.owner.partial, text),
+            )
 
     def prepare(self):
         self.engine.prepare()
+
+    def begin(self):
+        self.engine.begin()
+
+    def push(self, pcm):
+        self.engine.push(pcm)
+
+    def end(self, path, test_tone):
+        text = self.engine.end(path, test_tone)
+        self.post(self.owner.completed, path, text, True)
+        return text
+
+    def cancel(self):
+        self.engine.cancel()
 
     def post(self, callback, *args):
         if not self.loop.is_closed():
@@ -57,7 +79,7 @@ class SessionOutput:
         self.post(self.owner.processing, 1)
         try:
             text = self.engine.process(path, test_tone)
-            self.post(self.owner.completed, path, text)
+            self.post(self.owner.completed, path, text, False)
         except Exception as exc:
             self.post(self.owner.failed, str(exc))
         finally:
@@ -65,18 +87,26 @@ class SessionOutput:
 
 
 class VoiceSession:
-    def __init__(self, folder, *, output_factory=ProcessSpeechOutput, lease_factory=SingleInstance):
+    def __init__(self, folder, *, output_factory=StreamSpeechOutput, lease_factory=SingleInstance):
         self.folder = Path(folder)
         self.output_factory, self.lease_factory = output_factory, lease_factory
         try:
             self.settings = validate_voice(read_json(self.folder / "voice-settings.json"))
         except ValueError:
-            self.settings = dict(DEFAULT_VOICE)
+            # 旧版保存的是 whisper 的 tiny/base/small，迁移到流式模型并保留其他开关。
+            stored = read_json(self.folder / "voice-settings.json")
+            if isinstance(stored, dict) and stored.get("model") not in MODELS:
+                stored["model"] = DEFAULT_VOICE["model"]
+            try:
+                self.settings = validate_voice(stored)
+            except ValueError:
+                self.settings = dict(DEFAULT_VOICE)
         self.state = "waiting" if self.settings["enabled"] else "disabled"
         self.error = None
         self.connected = False
         self.results = []
         self.pending = 0
+        self.preview = ""
         self.generation = 0
         self.task = None
         self.lease = None
@@ -90,6 +120,7 @@ class VoiceSession:
             "processing": self.pending > 0,
             "last_error": self.error,
             "results": copy.deepcopy(self.results),
+            "partial": self.preview,
         }
 
     def update(self, **fields):
@@ -109,18 +140,37 @@ class VoiceSession:
         if generation == self.generation:
             self.error = error
 
-    def completed(self, generation, path, text):
+    def partial(self, generation, text):
+        """正在识别的一句话；只给网页做实时预览，不直接注入窗口。"""
+        if generation == self.generation:
+            self.preview = text or ""
+
+    def committed(self, generation, text):
+        """句尾停顿定稿的一句：这是真正「边说话边上屏」的输入点。"""
+        if generation != self.generation or not self.settings["enabled"]:
+            return
+        self.preview = ""
+        if not text:
+            return
+        if self.settings["type_text"]:
+            try:
+                type_text_windows(text)
+            except Exception as exc:
+                self.error = str(exc)
+
+    def completed(self, generation, path, text, typed=False):
         # 禁用、换设备、关闭服务后，旧线程完成的识别不得再注入文字。
         if generation != self.generation or not self.settings["enabled"]:
             return
+        self.preview = ""
         result = {
             "time": time.time(),
             "file": path.name,
             "text": text,
-            "typed": False,
+            "typed": bool(typed and text and self.settings["type_text"]),
             "error": None,
         }
-        if text and self.settings["type_text"]:
+        if text and self.settings["type_text"] and not typed:
             try:
                 type_text_windows(text)
                 result["typed"] = True
@@ -133,6 +183,7 @@ class VoiceSession:
         self.generation += 1
         self.connected = False
         self.pending = 0
+        self.preview = ""
         output, self.output = self.output, None
         if output:
             close = getattr(output.engine, "close", None)

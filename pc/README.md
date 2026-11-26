@@ -21,8 +21,8 @@ Windows 蓝牙设置中先配对 **ibook Keyboard**；首次升级带 Web 配置
 1. 双击 `start.cmd`，点击网页右上角“连接键盘”。
 2. 快捷键：选择 KEY1～KEY3，设置名称和组合键，再点击“保存到键盘”。
 3. 语音：点击网页 KEY4，在右侧勾选“启用语音接收”“识别为文字”，按需勾选“自动输入当前窗口”，点击“应用语音设置”。
-4. 等待状态显示“等待 KEY4”。在目标输入框中，按住实体 KEY4 说话，松开发送。每段最多 10 秒。
-5. 网页右侧显示最近 8 次识别结果，可复制。自动输入不按 Enter，文字会输入识别完成时的焦点窗口。
+4. 等待状态显示“等待 KEY4”。在目标输入框中，按住实体 KEY4 说话：一句说完停顿一下，这一句立刻上屏；松开发送最后一段。每段最多 10 秒。
+5. 网页右侧实时显示正在识别的半句和最近 8 次结果，可复制。自动输入不按 Enter，文字会输入定稿时的焦点窗口。
 6. 结束时点击网页“退出服务”，会同时停止语音和工作台。只关闭浏览器标签，后台仍运行。
 
 实体排列从左到右是 **KEY4（录音）、KEY1、KEY2、KEY3、旋钮**。点击网页旋钮可切换“页面滚动 / Enter”或“电脑音量 / 静音”。需要本次支持媒体控制的固件，并在 Windows 删除旧配对后重新添加。
@@ -31,7 +31,12 @@ Windows 蓝牙设置中先配对 **ibook Keyboard**；首次升级带 Web 配置
 语音设置保存在电脑 `runtime/voice-settings.json`；快捷键保存在键盘 Flash 中。
 再次打开工作台会恢复语音开关、模型和上次选择的键盘，并尝试连接；断线会重试同一地址。
 未启用语音时只运行按键配置。停用语音不会断开配置连接；“断开键盘连接”会暂停语音并停止重连，点击连接恢复。
-语音识别在本机 CPU 运行。默认 tiny，也可选 base 或 small；首次加载可能联网下载模型。
+语音识别在本机 CPU 运行，默认 `zipformer-zh` 流式中文模型（约 160 MB，首次需执行下面命令下载一次），
+也可切 `zipformer-zh-14m` 换更小的 14M 版本：
+
+```powershell
+.venv/Scripts/python.exe pc/tools/fetch_asr_model.py
+```
 
 ## 文件与入口
 
@@ -41,14 +46,16 @@ Windows 蓝牙设置中先配对 **ibook Keyboard**；首次升级带 Web 配置
 | `web_config.py` | 本地网页、HTTP API、后台事件循环 |
 | `keyboard_app.py` | 共用 BLE 连接、语音开关、模型任务、识别结果、断线重连 |
 | `keymap_client.py` / `keymap_protocol.py` | 快捷键传输、保存确认和回读校验 |
-| `voice_receiver.py` | 音频订阅、分片接收、重传确认、完整录音保存 |
+| `voice_receiver.py` | 音频订阅、逐帧接收、累积确认、完整录音保存 |
 | `voice_protocol.py` | 字节协议、CRC 和 ADPCM 解码 |
-| `voice_audio.py` | 保存 WAV 和本地语音识别 |
-| `speech_process.py` | 管理语音子进程及异常退出 |
+| `stream_asr.py` | sherpa-onnx 流式中文识别、端点定稿、模型路径 |
+| `voice_audio.py` | 保存 WAV；旧版整段 Whisper 识别（命令行调试用） |
+| `speech_process.py` | 语音子进程：流式 IPC 与整段识别两种模式 |
 | `windows_input.py` | Unicode 文字输入当前窗口 |
 | `voice_discovery.py` | 蓝牙设备发现和缓存 |
 | `voice_background.py` | 语音单实例互斥锁及独立接收器诊断基础设施 |
 | `tools/background.py` | 旧版独立接收器管理工具，日常不需要运行 |
+| `tools/fetch_asr_model.py` | 下载并解压流式识别模型到 `.pio/asr_models` |
 | `web/` | 界面、快捷键录入和语音结果展示 |
 | `tests/` | 自动化测试，日常不需要运行 |
 
@@ -81,7 +88,10 @@ Windows 蓝牙设置中先配对 **ibook Keyboard**；首次升级带 Web 配置
 ```powershell
 .venv/Scripts/python.exe pc/voice_receiver.py --test-tone
 .venv/Scripts/python.exe pc/voice_receiver.py --transcribe --model tiny
+.venv/Scripts/python.exe pc/stream_asr.py pc/recordings/voice_xxx.wav
 ```
+
+第三条按 20 ms 一帧离线回放一个 WAV，用来核对流式识别和分段定稿；`--transcribe` 那条是旧版整段 Whisper 路径。
 
 前台终端 Enter/n/x/q 操作仅用于诊断，日常无需终端。
 更多协议与开发说明见 [Web 配置说明](../docs/web-config.md)、[开发说明](../docs/development.md)。

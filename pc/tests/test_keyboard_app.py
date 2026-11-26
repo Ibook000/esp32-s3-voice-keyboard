@@ -110,6 +110,20 @@ class UnifiedTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(voice.results), 1)
                 self.assertEqual(inject.call_count, 1)
 
+    async def test_endpoint_commit_types_sentence_without_duplicating_at_end(self):
+        with tempfile.TemporaryDirectory() as folder:
+            voice = app.VoiceSession(folder)
+            voice.settings = dict(app.DEFAULT_VOICE, enabled=True, type_text=True)
+            with mock.patch.object(app, "type_text_windows") as inject:
+                voice.partial(0, "今天天气")
+                self.assertEqual(voice.snapshot()["partial"], "今天天气")
+                voice.committed(0, "今天天气很好。")
+                inject.assert_called_once_with("今天天气很好。")
+                self.assertEqual(voice.snapshot()["partial"], "")
+                voice.completed(0, Path("clip.wav"), "今天天气很好。", True)
+                self.assertEqual(inject.call_count, 1)  # 定稿已上屏，收尾不重复输入
+                self.assertTrue(voice.results[0]["typed"])
+
     async def test_settings_persist_and_invalid_flags_rejected(self):
         with tempfile.TemporaryDirectory() as folder:
             voice = app.VoiceSession(folder)

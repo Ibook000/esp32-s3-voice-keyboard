@@ -15,6 +15,7 @@ import tempfile
 import unittest
 import wave
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 from unittest import mock
 
@@ -31,21 +32,21 @@ def block(count=320, predictor=0, index=0, data=None):
     return payload + struct.pack("<H", binascii.crc_hqx(payload, 0xFFFF))
 
 
-def status(state=p.State.SENDING, session=1, frames=2, error=0, flags=0):
+def status(state=p.State.SENDING, session=1, frames=2, error=0, flags=0, version=1):
     return p.STATUS.pack(
-        1, 0x10, state, error, session, frames, 16000, 320, frames * 320, 10, flags
+        version, 0x10, state, error, session, frames, 16000, 320, frames * 320, 10, flags
     )
 
 
-def fragments(data, sequence=0, size=12, session=1):
+def fragments(data, sequence=0, size=12, session=1, version=p.LEGACY_VERSION):
     return [
-        p.FRAGMENT.pack(1, 0x20, session, sequence, offset) + data[offset : offset + size]
+        p.FRAGMENT.pack(version, 0x20, session, sequence, offset) + data[offset : offset + size]
         for offset in range(0, len(data), size)
     ]
 
 
 class ProtocolTests(unittest.TestCase):
-    def test_firmware_service_uuids_match_receiver(self):
+    def test_firmware_protocol_constants_match_receiver(self):
         header = (Path(__file__).resolve().parents[2] / "include" / "voice_protocol.h").read_text(
             encoding="utf-8"
         )
@@ -53,6 +54,9 @@ class ProtocolTests(unittest.TestCase):
             match = re.search(rf'{name}\[\]\s*=\s*"([^"]+)"', header)
             self.assertIsNotNone(match, name)
             self.assertEqual(match.group(1), getattr(p, name))
+        match = re.search(r"\bVERSION\s*=\s*(\d+)", header)
+        self.assertIsNotNone(match)
+        self.assertEqual(int(match.group(1)), p.STREAM_VERSION)
 
     def test_known_ima_vector_low_nibble_first(self):
         # At step index zero, codes 1,2,3,4 add 1,3,4,7 respectively.
@@ -124,6 +128,24 @@ class ProtocolTests(unittest.TestCase):
             p.DeviceStatus.parse(data)
         with self.assertRaises(ValueError):
             p.DeviceStatus.parse(status()[:-1])
+
+    def test_streaming_version_and_cumulative_ack(self):
+        parsed = p.DeviceStatus.parse(status(p.State.RECORDING, frames=3, version=2))
+        self.assertTrue(parsed.streaming)
+        self.assertEqual(parsed.version, 2)
+        self.assertFalse(p.DeviceStatus.parse(status(version=1)).streaming)
+        with self.assertRaises(ValueError):
+            p.DeviceStatus.parse(status(version=3))
+        # 版本 2 的 ACK 回「下一期望帧号」，可以一次跨多帧。
+        clip = p.ClipAssembler(1, cumulative=True)
+        with self.assertRaisesRegex(ValueError, "Invalid audio fragment type"):
+            clip.feed(fragments(block())[0])
+        for sequence in range(3):
+            ack = clip.feed(
+                fragments(block(), sequence=sequence, size=200, version=p.STREAM_VERSION)[0]
+            )
+            self.assertEqual(struct.unpack("<BHH", ack), (p.ACK, 1, sequence + 1))
+        self.assertEqual(clip.next_sequence, 3)
 
     def test_cli_rejects_unbounded_recordings_and_implicit_typing(self):
         with contextlib.redirect_stderr(io.StringIO()):
@@ -302,6 +324,7 @@ class FakeClient:
         self.mtu_size = 23
         self.callbacks = {}
         self.commands = []
+        self.version = 1
         self.packet = status(p.State.IDLE, frames=0)
         self.ack = asyncio.Event()
         self.retries = 0
@@ -327,7 +350,7 @@ class FakeClient:
         return self.packet
 
     def publish(self, state, frames=2):
-        self.packet = status(state, frames=frames)
+        self.packet = status(state, frames=frames, version=self.version)
         self.callbacks[p.STATUS_UUID](None, self.packet)
 
     async def write_gatt_char(self, uuid, data, response):
@@ -473,6 +496,80 @@ class EndToEndTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(RuntimeError, "disconnected"):
                 await self.run_receiver(folder, disconnect=True)
             self.assertEqual(list(Path(folder).glob("*.wav")), [])
+
+
+class StreamingReceiverTests(unittest.IsolatedAsyncioTestCase):
+    async def test_live_frames_reach_engine_before_the_button_is_released(self):
+        # 版本 2 固件边录边发：PC 必须在录音阶段就解码并推给识别引擎。
+        with tempfile.TemporaryDirectory() as folder:
+            args = receiver.parse_args([])
+            args.daemon = True
+            args.output = Path(folder)
+            fake = FakeClient(None)
+            fake.version = 2
+            fake.packet = status(p.State.IDLE, frames=0, version=2)
+            output = mock.Mock(streaming=True)
+            output.end.return_value = "测试语音"
+            release_asr = Event()
+            output.push.side_effect = lambda _: release_asr.wait(10)
+            ready = asyncio.Event()
+
+            async def read_status(uuid):
+                ready.set()
+                return fake.packet
+
+            fake.read_gatt_char = read_status
+
+            def factory(*args_in, **kwargs):
+                fake.disconnected_callback = kwargs["disconnected_callback"]
+                return fake
+
+            async def wait_until(predicate, limit=2.0):
+                async with asyncio.timeout(limit):
+                    while not predicate():
+                        await asyncio.sleep(0.01)
+
+            with (
+                mock.patch.object(receiver, "find_device", mock.AsyncMock(return_value="fake")),
+                mock.patch.object(receiver, "STREAM_ACK_FRAMES", 1),
+                mock.patch.dict(sys.modules, {"bleak": SimpleNamespace(BleakClient=factory)}),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                task = asyncio.create_task(receiver.receive(args, output))
+                try:
+                    await ready.wait()
+                    fake.publish(p.State.RECORDING, frames=0)
+                    await wait_until(lambda: output.begin.call_count == 1)
+                    packets = fragments(block(), version=p.STREAM_VERSION)
+                    for packet in packets:
+                        fake.callbacks[p.AUDIO_UUID](None, packet)
+                    await wait_until(lambda: output.push.call_count == 1)
+                    self.assertEqual(output.push.call_args.args[0], bytes(640))
+                    ack = struct.pack("<BHH", p.ACK, 1, 1)
+                    self.assertEqual(fake.commands, [ack])
+                    self.assertTrue(fake.dropped_ack)
+
+                    # The peripheral retries the only frame after losing the first tail ACK.
+                    fake.publish(p.State.SENDING, frames=1)
+                    await asyncio.sleep(receiver.STREAM_ACK_SECONDS)
+                    for packet in packets:
+                        fake.callbacks[p.AUDIO_UUID](None, packet)
+                    await asyncio.wait_for(fake.ack.wait(), 2)
+                    fake.publish(p.State.COMPLETE, frames=1)
+                    self.assertEqual(fake.commands, [ack, ack])
+                    output.push.assert_called_once()
+                    await wait_until(lambda: len(list(Path(folder).glob("*.wav"))) == 1)
+                    output.end.assert_not_called()
+                    release_asr.set()
+                    await wait_until(lambda: output.end.call_count == 1)
+                    output.cancel.assert_not_called()
+                finally:
+                    release_asr.set()
+                    fake.is_connected = False
+                    fake.disconnected_callback(fake)
+                    task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, RuntimeError):
+                        await task
 
 
 if __name__ == "__main__":

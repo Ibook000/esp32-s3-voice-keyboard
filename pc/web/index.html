@@ -64,9 +64,9 @@
       <div class="editor-heading"><span class="key-tag">04</span><div><p class="eyebrow">当前选择 · KEY4</p><h2 id="voice-title">语音配置</h2></div></div><div class="voice-controls"><span id="voice-status" class="voice-status" role="status">未启用</span>
         <p class="voice-description">使用键盘麦克风录音；在电脑本地识别中文。</p>
         <form id="voice-form"><label class="voice-option"><input id="voice-enabled" type="checkbox">启用语音接收</label><label class="voice-option"><input id="voice-transcribe" type="checkbox" checked>识别为文字</label><label class="voice-option"><input id="voice-type" type="checkbox" checked>自动输入当前窗口</label>
-        <div class="voice-model-row"><label for="voice-model">识别模型</label><select id="voice-model"><option value="tiny">tiny · 快速</option><option value="base">base · 均衡</option><option value="small">small · 更准确</option></select><button id="voice-apply" class="button button-dark" type="submit">应用语音设置</button></div></form>
-        <p class="field-help">开启后按住最左侧 KEY4 说话，松开后发送。自动输入时，请保持目标输入框有焦点。首次使用模型可能需要下载。</p><p id="voice-error" class="validation" role="status"></p>
-      </div><div class="voice-results"><div class="section-line"><span>最近识别结果</span><span class="subtle">本次运行 · 最多 8 条</span></div><div id="voice-results" aria-live="polite"><p class="voice-empty">启用语音并连接键盘后，按住 KEY4 开始录音。</p></div></div>
+        <div class="voice-model-row"><label for="voice-model">识别模型</label><select id="voice-model"><option value="zipformer-zh">zipformer · 流式中文</option><option value="zipformer-zh-14m">zipformer-14m · 更轻</option></select><button id="voice-apply" class="button button-dark" type="submit">应用语音设置</button></div></form>
+        <p class="field-help">开启后按住最左侧 KEY4 说话，每说完一句停顿一下就会自动上屏；松开发送剩余内容。自动输入时，请保持目标输入框有焦点。</p><p id="voice-error" class="validation" role="status"></p>
+      </div><div class="voice-results"><div class="section-line"><span>最近识别结果</span><span class="subtle">本次运行 · 最多 8 条</span></div><p id="voice-partial" class="voice-partial" hidden></p><div id="voice-results" aria-live="polite"><p class="voice-empty">启用语音并连接键盘后，按住 KEY4 开始录音。</p></div></div>
     </aside>
       <aside class="editor" id="rotary-editor" aria-labelledby="rotary-title" hidden>
         <div class="editor-heading"><span class="key-tag">↻</span><div><p class="eyebrow">当前选择 · 旋钮</p><h2 id="rotary-title">旋钮模式</h2></div></div>

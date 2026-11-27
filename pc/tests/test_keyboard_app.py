@@ -72,7 +72,7 @@ class UnifiedTests(unittest.IsolatedAsyncioTestCase):
                     contextlib.redirect_stdout(io.StringIO()),
                     mock.patch.object(app, "type_text_windows") as inject,
                 ):
-                    await desk.connect("44:1B:F6:FF:C9:1D")
+                    await desk.connect("02:00:00:00:00:01")
                     await desk.configure_voice(
                         dict(app.DEFAULT_VOICE, enabled=True, type_text=False)
                     )
@@ -120,9 +120,14 @@ class UnifiedTests(unittest.IsolatedAsyncioTestCase):
                 voice.committed(0, "今天天气很好。")
                 inject.assert_called_once_with("今天天气很好。")
                 self.assertEqual(voice.snapshot()["partial"], "")
+                voice.partial(0, "适合出")
+                self.assertEqual(voice.snapshot()["confirmed"], "今天天气很好。")
+                self.assertEqual(voice.snapshot()["partial"], "适合出")
                 voice.completed(0, Path("clip.wav"), "今天天气很好。", True)
                 self.assertEqual(inject.call_count, 1)  # 定稿已上屏，收尾不重复输入
                 self.assertTrue(voice.results[0]["typed"])
+                self.assertEqual(voice.snapshot()["confirmed"], "")
+                self.assertEqual(voice.snapshot()["partial"], "")
 
     async def test_settings_persist_and_invalid_flags_rejected(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -143,7 +148,7 @@ class UnifiedTests(unittest.IsolatedAsyncioTestCase):
             )
             voice.settings = dict(app.DEFAULT_VOICE, enabled=True)
             with self.assertRaisesRegex(ValueError, "旧语音后台"):
-                await voice.start(SimpleNamespace(is_connected=True), "44:1B:F6:FF:C9:1D")
+                await voice.start(SimpleNamespace(is_connected=True), "02:00:00:00:00:01")
             self.assertIsNone(voice.task)
 
     async def test_disconnect_reconnect_uses_the_same_selected_peer(self):
@@ -151,11 +156,11 @@ class UnifiedTests(unittest.IsolatedAsyncioTestCase):
             peer = SharedGatt(None)
             desk = app.KeyboardApp(Path(folder) / "runtime", client_factory=lambda *a, **k: peer)
             try:
-                await desk.connect("44:1B:F6:FF:C9:1D")
+                await desk.connect("02:00:00:00:00:01")
                 desk.reconnect = asyncio.create_task(desk.maintain())
                 peer.is_connected = False
                 await self.wait_until(lambda: peer.connects == 2)
-                self.assertEqual(desk.address, "44:1B:F6:FF:C9:1D")
+                self.assertEqual(desk.address, "02:00:00:00:00:01")
                 await desk.disconnect()
                 self.assertIsNone(desk.target)
                 self.assertFalse(desk.connected)
@@ -174,7 +179,7 @@ class UnifiedTests(unittest.IsolatedAsyncioTestCase):
                 lease_factory=lambda _: mock.Mock(),
             )
             try:
-                await desk.connect("44:1B:F6:FF:C9:1D")
+                await desk.connect("02:00:00:00:00:01")
                 with self.assertLogs(level="ERROR"):
                     await desk.configure_voice(dict(app.DEFAULT_VOICE, enabled=True))
                     await self.wait_until(lambda: desk.voice.state == "error")

@@ -71,6 +71,11 @@ class ConfigServer(ThreadingHTTPServer):
 
 
 class Handler(BaseHTTPRequestHandler):
+    def log_request(self, code="-", size="-"):
+        if self.command == "GET" and self.path == "/api/voice" and code == 200:
+            return
+        super().log_request(code, size)
+
     def log_message(self, fmt, *args):
         logging.info(fmt, *args)
 
@@ -108,6 +113,8 @@ class Handler(BaseHTTPRequestHandler):
                 )
             elif route == "/api/status":
                 self.reply(200, self.server.worker.call(self.server.worker.client.status()))
+            elif route == "/api/voice":
+                self.reply(200, self.server.worker.call(self.server.worker.client.voice_status()))
             elif route == "/api/devices":
                 self.reply(
                     200, {"devices": self.server.worker.call(self.server.worker.client.devices())}

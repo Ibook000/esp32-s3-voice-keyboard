@@ -505,9 +505,10 @@ class StreamingReceiverTests(unittest.IsolatedAsyncioTestCase):
             args = receiver.parse_args([])
             args.daemon = True
             args.output = Path(folder)
+            args.runtime = mock.Mock()
             fake = FakeClient(None)
             fake.version = 2
-            fake.packet = status(p.State.IDLE, frames=0, version=2)
+            fake.packet = status(p.State.ERROR, frames=0, error=4, version=2)
             output = mock.Mock(streaming=True)
             output.end.return_value = "测试语音"
             release_asr = Event()
@@ -532,12 +533,18 @@ class StreamingReceiverTests(unittest.IsolatedAsyncioTestCase):
             with (
                 mock.patch.object(receiver, "find_device", mock.AsyncMock(return_value="fake")),
                 mock.patch.object(receiver, "STREAM_ACK_FRAMES", 1),
+                mock.patch.object(p.DeviceStatus, "parse", wraps=p.DeviceStatus.parse) as parse_status,
                 mock.patch.dict(sys.modules, {"bleak": SimpleNamespace(BleakClient=factory)}),
                 contextlib.redirect_stdout(io.StringIO()),
             ):
                 task = asyncio.create_task(receiver.receive(args, output))
                 try:
                     await ready.wait()
+                    await wait_until(lambda: parse_status.call_count >= 2)
+                    previous_error = mock.call(last_error=p.ERRORS[4])
+                    self.assertNotIn(previous_error, args.runtime.update.call_args_list)
+                    fake.callbacks[p.STATUS_UUID](None, fake.packet)
+                    await wait_until(lambda: previous_error in args.runtime.update.call_args_list)
                     fake.publish(p.State.RECORDING, frames=0)
                     await wait_until(lambda: output.begin.call_count == 1)
                     packets = fragments(block(), version=p.STREAM_VERSION)

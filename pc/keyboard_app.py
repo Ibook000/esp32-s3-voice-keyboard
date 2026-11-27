@@ -57,6 +57,7 @@ class SessionOutput:
         self.engine.prepare()
 
     def begin(self):
+        self.post(self.owner.reset_preview)
         self.engine.begin()
 
     def push(self, pcm):
@@ -107,6 +108,7 @@ class VoiceSession:
         self.results = []
         self.pending = 0
         self.preview = ""
+        self.confirmed_preview = ""
         self.generation = 0
         self.task = None
         self.lease = None
@@ -121,6 +123,7 @@ class VoiceSession:
             "last_error": self.error,
             "results": copy.deepcopy(self.results),
             "partial": self.preview,
+            "confirmed": self.confirmed_preview,
         }
 
     def update(self, **fields):
@@ -140,6 +143,11 @@ class VoiceSession:
         if generation == self.generation:
             self.error = error
 
+    def reset_preview(self, generation):
+        if generation == self.generation:
+            self.preview = ""
+            self.confirmed_preview = ""
+
     def partial(self, generation, text):
         """正在识别的一句话；只给网页做实时预览，不直接注入窗口。"""
         if generation == self.generation:
@@ -152,6 +160,7 @@ class VoiceSession:
         self.preview = ""
         if not text:
             return
+        self.confirmed_preview += text
         if self.settings["type_text"]:
             try:
                 type_text_windows(text)
@@ -162,7 +171,7 @@ class VoiceSession:
         # 禁用、换设备、关闭服务后，旧线程完成的识别不得再注入文字。
         if generation != self.generation or not self.settings["enabled"]:
             return
-        self.preview = ""
+        self.reset_preview(generation)
         result = {
             "time": time.time(),
             "file": path.name,
@@ -183,7 +192,7 @@ class VoiceSession:
         self.generation += 1
         self.connected = False
         self.pending = 0
-        self.preview = ""
+        self.reset_preview(self.generation)
         output, self.output = self.output, None
         if output:
             close = getattr(output.engine, "close", None)
@@ -310,6 +319,9 @@ class KeyboardApp(KeymapClient):
         result = await super().status()
         result["voice"] = self.voice.snapshot()
         return result
+
+    async def voice_status(self):
+        return {"connected": self.connected, "voice": self.voice.snapshot()}
 
     async def maintain(self):
         """使用用户选定的设备地址重连；不切换到另一台同名键盘。"""

@@ -13,6 +13,19 @@ python -m venv .venv
 ```
 
 需要真实语音转写时，另行安装 `pc/requirements-asr.txt`。
+
+## 构建 Windows 便携版
+
+在 Windows x64 上安装 Python 依赖和 MinGW-w64 的 x64 GCC，然后在仓库根目录执行。
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r pc/requirements-asr.txt
+.\.venv\Scripts\python.exe pc/tools/fetch_asr_model.py
+.\.venv\Scripts\python.exe pc/tools/build_portable.py
+```
+
+构建生成 `dist/ibook-keyboard-win64` 和同名 ZIP。解压整个 ZIP，双击 `ibook Keyboard.exe`。可以用 `--output` 为下一次构建指定新目录。
+压缩包内含 Python 运行时、PC 工作台和默认中文流式模型。录音、日志、设备缓存和用户设置留在各自的运行目录。
 单元测试通过模拟外部服务验证转写调用，不下载模型、不触发真实文字输入。
 
 ## 检查

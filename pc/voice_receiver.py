@@ -130,7 +130,7 @@ async def receive(args: argparse.Namespace, output: SpeechOutput, *, client=None
     saved_session: int | None = None  # 状态可能重复通知，同一会话只保存一次。
     current: DeviceStatus | None = None
     last_progress = time.monotonic()
-    last_status_packet: bytes | None = None
+    status_notifications_ready = False
     streaming_output = getattr(output, "streaming", False) is True  # 引擎支持边收边识别。
     acked_frames = 0  # 最近一次累积 ACK 覆盖到的帧数。
     acked_at = 0.0
@@ -191,6 +191,10 @@ async def receive(args: argparse.Namespace, output: SpeechOutput, *, client=None
     def disconnected(_):
         loop.call_soon_threadsafe(events.put_nowait, ("disconnected", None))
 
+    def status_changed(_, data):
+        if status_notifications_ready:
+            events.put_nowait(("status_notification", bytes(data)))
+
     async def delayed_stop():
         await asyncio.sleep(args.duration)
         await events.put(("command", "stop"))
@@ -234,26 +238,30 @@ async def receive(args: argparse.Namespace, output: SpeechOutput, *, client=None
             raise RuntimeError(
                 "Voice service has incomplete characteristics; refresh this keyboard's Windows pairing/GATT cache."
             )
-        await client.start_notify(
-            STATUS_UUID, lambda _, data: events.put_nowait(("status", bytes(data)))
-        )
+        await client.start_notify(STATUS_UUID, status_changed)
         await client.start_notify(
             AUDIO_UUID, lambda _, data: events.put_nowait(("audio", bytes(data)))
         )
-        initial = bytes(await client.read_gatt_char(STATUS_UUID))
-        current = DeviceStatus.parse(initial)
+        last_status_packet = bytes(await client.read_gatt_char(STATUS_UUID))
+        current = DeviceStatus.parse(last_status_packet)
         print("Voice notifications subscribed; microphone capture is available.", flush=True)
         remember_device(args, device)
         # 旧进程确认过的音频已经丢失，重连后必须取消旧会话，不能接着拼接。
         if current.state in (State.RECORDING, State.SENDING):
             await client.write_gatt_char(CONTROL_UUID, bytes([CANCEL]), response=True)
             await asyncio.sleep(0.15)
-            current = DeviceStatus.parse(bytes(await client.read_gatt_char(STATUS_UUID)))
+            last_status_packet = bytes(await client.read_gatt_char(STATUS_UUID))
+            current = DeviceStatus.parse(last_status_packet)
             while not events.empty():
                 kind, _ = events.get_nowait()
                 if kind == "disconnected":
                     raise RuntimeError("Keyboard disconnected while resetting its old session")
             print("Cancelled an unfinished session from the previous receiver.", flush=True)
+        # 订阅完成前留下的设备状态只作基线。后续通知仍能报告同一错误码。
+        status_notifications_ready = True
+        logging.info(
+            "Voice notifications subscribed; ATT MTU=%s; protocol=v%s", client.mtu_size, current.version
+        )
         if runtime:
             runtime.update(
                 status="connected",
@@ -319,14 +327,16 @@ async def receive(args: argparse.Namespace, output: SpeechOutput, *, client=None
                     packet = await handle_recording_command(client, data, current)
                     if packet is not None:
                         current = DeviceStatus.parse(packet)
-                        await events.put(("status", packet))
+                        await events.put(("status_notification", packet))
                     continue
 
                 # 4. 状态通知决定会话边界；音频通知负责拼片、校验、解码和 ACK。
-                if kind == "status":
+                if kind in ("status", "status_notification"):
                     next_poll = time.monotonic() + 1
                     current = DeviceStatus.parse(data)
-                    changed = data != last_status_packet
+                    changed = data != last_status_packet or (
+                        kind == "status_notification" and current.state == State.ERROR
+                    )
                     if changed:
                         print(
                             f"Voice {current.state.name.lower()}; session={current.session}; frames={current.frames}",

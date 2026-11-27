@@ -176,7 +176,7 @@ class FirmwareTests(unittest.IsolatedAsyncioTestCase):
 
         backend = KeymapClient(lambda *_, **__: FakeGatt())
         with patch("keymap_client.known_device", return_value="test-device"):
-            await backend.connect("44:1B:F6:FF:C9:1D")
+            await backend.connect("02:00:00:00:00:01")
         keys = copy.deepcopy(DEFAULT_KEYS)
         keys[0].update(label="保存", key=22)
         result = await backend.save(keys)

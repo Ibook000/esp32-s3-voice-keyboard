@@ -1,7 +1,11 @@
 // 语音设置和结果使用工作台同一个本地 API，不在浏览器采集麦克风。
-let latest=null, dirty=false, applying=false;
+let latest=null, dirty=false, applying=false, renderedResults;
 const $=s=>document.querySelector(s);
 const labels={disabled:'未启用',waiting:'等待连接',loading_model:'正在加载模型…',subscribing:'正在准备录音…',connecting:'正在订阅',connected:'等待 KEY4',idle:'等待 KEY4',recording:'正在录音',sending:'正在收尾',complete:'录音已接收',error:'语音异常'};
+function setText(node, text) {
+  if (node.textContent !== text) node.textContent = text;
+}
+
 export function renderVoice(voice, connected=false) {
   if(!voice)return;
   latest=voice;
@@ -12,11 +16,19 @@ export function renderVoice(voice, connected=false) {
     $('#voice-model').value=voice.settings.model;
   }
   $('#voice-type').disabled=applying || !$('#voice-transcribe').checked;
-  $('#voice-status').textContent=voice.processing?'正在识别…':voice.settings.enabled && !connected?'等待连接':labels[voice.status] || voice.status;
+  const statusText=voice.processing?'正在识别…':voice.settings.enabled && !connected?'等待连接':labels[voice.status] || voice.status;
+  setText($('#voice-status'), statusText);
   $('#voice-status').classList.toggle('error',Boolean(voice.last_error));
-  $('#voice-error').textContent=voice.last_error || '';
-  const partial=$('#voice-partial');
-  partial.hidden=!voice.partial;partial.textContent=voice.partial?voice.partial+'…':'';
+  setText($('#voice-error'), voice.last_error || '');
+  const confirmed = voice.confirmed || '';
+  const partial = voice.partial || '';
+  $('#voice-live').hidden = !connected || !voice.connected || voice.status === 'error' || !(confirmed || partial);
+  setText($('#voice-confirmed'), confirmed);
+  setText($('#voice-partial'), partial ? partial + '…' : '');
+
+  const results = JSON.stringify(voice.results);
+  if (results === renderedResults) return;
+  renderedResults = results;
   const list=$('#voice-results');list.replaceChildren();
   if(!voice.results.length){const p=document.createElement('p');p.className='voice-empty';p.textContent='启用语音并连接键盘后，按住 KEY4 开始录音。';list.append(p);}
   voice.results.forEach(result=>{
@@ -29,6 +41,31 @@ export function renderVoice(voice, connected=false) {
   });
 }
 export function initVoice(api,notify){
+  let keyboardConnected = false;
+  let refreshTimer;
+  let stopped = false;
+  let revision = 0;
+
+  async function refresh() {
+    const requestRevision = revision;
+    if (!applying) {
+      try {
+        const {voice, connected} = await api('voice');
+        if (!stopped && requestRevision === revision) {
+          keyboardConnected = connected;
+          renderVoice(voice, connected);
+        }
+      } catch {
+        if (!stopped && requestRevision === revision) {
+          keyboardConnected = false;
+          if (latest) renderVoice(latest, false);
+        }
+      }
+    }
+    const live = keyboardConnected && latest?.connected && latest.settings.transcribe;
+    if (!stopped) refreshTimer = setTimeout(refresh, live ? 180 : 800);
+  }
+
   $('#voice-form').addEventListener('change',()=>{
     dirty=true;
     if(!$('#voice-transcribe').checked)$('#voice-type').checked=false;
@@ -37,11 +74,17 @@ export function initVoice(api,notify){
   $('#voice-form').addEventListener('submit',async event=>{
     event.preventDefault();if(applying)return;
     const options={enabled:$('#voice-enabled').checked,transcribe:$('#voice-transcribe').checked,type_text:$('#voice-type').checked,model:$('#voice-model').value};
+    revision++;
     applying=true;$('#voice-form').querySelectorAll('input,select,button').forEach(e=>e.disabled=true);
     try{
       const result=await api('voice',options);dirty=false;latest=result;
       notify(options.enabled?'语音设置已应用，等待模型和蓝牙就绪。':'语音已停用，快捷键配置仍可使用。');
     }catch(error){notify(error.message,true);}
-    finally{applying=false;$('#voice-form').querySelectorAll('input,select,button').forEach(e=>e.disabled=false);if(latest)renderVoice(latest,latest.connected);}
+    finally{applying=false;$('#voice-form').querySelectorAll('input,select,button').forEach(e=>e.disabled=false);if(latest)renderVoice(latest,keyboardConnected);}
   });
+  refresh();
+  return () => {
+    stopped = true;
+    clearTimeout(refreshTimer);
+  };
 }

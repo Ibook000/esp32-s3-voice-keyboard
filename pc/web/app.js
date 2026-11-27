@@ -1,4 +1,4 @@
-import { initVoice, renderVoice } from './voice.js';
+import { initVoice } from './voice.js';
 import { DEFAULTS, MODIFIERS, KEYS, clone, combo, fromEvent, setModifier, validate, changed } from './model.js';
 
 const $ = selector => document.querySelector(selector);
@@ -8,7 +8,7 @@ let connected = false, busy = false, recording = false, token = '', stopped = fa
 let toastTimer, pollTimer, operationGeneration = 0;
 let savedRotary=null, rotaryDraft="scroll";
 let savedSleep=null, sleepDraft=10;
-initVoice(api, notify);
+const stopVoicePolling = initVoice(api, notify);
 const form = $('#key-form');
 const keySelect = $('#normal-key');
 for (const key of KEYS) {
@@ -244,7 +244,7 @@ $('#read').addEventListener('click',()=>{
 $('#disconnect').addEventListener('click',()=>operation(async()=>{await api('disconnect',{});connected=false;notify('键盘连接已断开，语音已暂停，页面草稿仍然保留。');},'正在断开'));
 $('#stop').addEventListener('click',()=>{
   if(!confirm(changed(draft,saved)?'还有未保存的修改，仍要退出配置服务吗？':'退出工作台并停止语音？已保存的快捷键会继续生效。'))return;
-  operation(async()=>{await api('stop',{});connected=false;stopped=true;clearInterval(pollTimer);notify('工作台已退出。下次双击 start.cmd 即可重新打开。');});
+  operation(async()=>{await api('stop',{});connected=false;stopped=true;clearInterval(pollTimer);stopVoicePolling();notify('工作台已退出。下次双击 start.cmd 即可重新打开。');});
 });
 window.addEventListener('beforeunload',event=>{if((changed(draft,saved) || (savedRotary!==null && rotaryDraft!==savedRotary) || (savedSleep!==null && sleepDraft!==savedSleep)) && !stopped){event.preventDefault();event.returnValue='';}});
 
@@ -255,7 +255,7 @@ async function poll() {
     const status=await api('status');
     if(generation!==operationGeneration || busy || stopped) return;
     if(connected && !status.connected) notify('键盘连接已断开，未保存的草稿仍保留。',true);
-    connected=status.connected;updateRotary(status.config);render();renderVoice(status.voice,connected);
+    connected=status.connected;updateRotary(status.config);render();
   } catch {if(generation===operationGeneration && !busy && !stopped){connected=false;render();stateText('服务未连接');}}
 }
 render();
@@ -263,6 +263,5 @@ try {
   const session=await api('session');token=session.token;
   const status=await api('status');connected=status.connected;
   if(status.config){saved=clone(status.config.keys);draft=clone(saved);updateRotary(status.config);}
-  renderVoice(status.voice,connected);
   render();pollTimer=setInterval(poll,3000);
 } catch(error) {notify(error.message,true);stateText('服务未连接');}

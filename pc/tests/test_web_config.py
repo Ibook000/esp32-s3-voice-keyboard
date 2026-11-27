@@ -27,6 +27,9 @@ class FakeClient:
             "config": {"keys": self.keys} if self.connected else None,
         }
 
+    async def voice_status(self):
+        return {"connected": self.connected, "voice": {"settings": self.voice, "partial": "正在识别"}}
+
     async def save_sleep(self, minutes):
         if type(minutes) is not int or not 0 <= minutes <= 120:
             raise ValueError("Invalid sleep timeout")
@@ -42,7 +45,7 @@ class FakeClient:
         return {"settings": self.voice}
 
     async def devices(self):
-        return [{"address": "44:1B:F6:FF:C9:1D", "name": "ibook Keyboard"}]
+        return [{"address": "02:00:00:00:00:01", "name": "ibook Keyboard"}]
 
     async def connect(self, address):
         self.connected = True
@@ -110,7 +113,7 @@ class WebApiTests(unittest.TestCase):
     def test_connect_load_save_and_read_back(self):
         self.assertEqual(self.request("/api/config", "POST", {"keys": DEFAULT_KEYS})[0], 503)
         self.assertEqual(
-            self.request("/api/connect", "POST", {"address": "44:1B:F6:FF:C9:1D"})[0], 200
+            self.request("/api/connect", "POST", {"address": "02:00:00:00:00:01"})[0], 200
         )
         keys = copy.deepcopy(DEFAULT_KEYS)
         keys[2].update(label="保存", key=22)
@@ -129,7 +132,7 @@ class WebApiTests(unittest.TestCase):
         )
 
     def test_validation_and_unknown_routes(self):
-        self.request("/api/connect", "POST", {"address": "44:1B:F6:FF:C9:1D"})
+        self.request("/api/connect", "POST", {"address": "02:00:00:00:00:01"})
         self.assertEqual(self.request("/api/config", "POST", {"keys": []})[0], 400)
         self.assertEqual(self.request("/api/missing", "POST", {})[0], 404)
 
@@ -138,6 +141,10 @@ class WebApiTests(unittest.TestCase):
         status, _, body = self.request("/api/voice", "POST", options)
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["settings"], options)
+        status, headers, body = self.request("/api/voice")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Cache-Control"], "no-store")
+        self.assertEqual(json.loads(body)["voice"], {"settings": options, "partial": "正在识别"})
         self.assertEqual(
             self.request("/api/voice", "POST", {}, {"X-Keyboard-Token": "bad"})[0], 403
         )
